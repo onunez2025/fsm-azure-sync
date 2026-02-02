@@ -57,7 +57,7 @@ const MA_FIELDS = [
     'mt.reservedMaterials', 'mt.syncStatus', 'mt.udfValues', 'mt.warehouse'
 ];
 const IT_FIELDS = [
-    'it.code', 'it.createDateTime', 'it.externalId', 'it.groupCode', 'it.id',
+    'it.code', 'it.createDateTime', 'it.groupCode', 'it.id',
     'it.inactive', 'it.inventoryItem', 'it.lastChanged', 'it.lastChangedBy',
     'it.name', 'it.nameTranslations', 'it.purchaseItem', 'it.salesItem',
     'it.serialNumberItem', 'it.syncStatus', 'it.tool', 'it.typeCode',
@@ -118,135 +118,143 @@ const checkedColumns = new Set();
 
 async function genericSync(pool, token, entityName, dtoVersion, fields, lastSyncTable, recordKey) {
     const logPrefix = `[${entityName.padEnd(15)}]`;
-    console.log(`${logPrefix} Starting Deep Sync...`);
+    try {
+        console.log(`${logPrefix} Starting Deep Sync...`);
 
-    const cursorResult = await pool.request().query(`
-        SELECT TOP 1 lastChanged, id FROM [${SCHEMA}].[${lastSyncTable}] 
-        ORDER BY lastChanged DESC, id DESC
-    `);
+        const cursorResult = await pool.request().query(`
+            SELECT TOP 1 lastChanged, id FROM [${SCHEMA}].[${lastSyncTable}] 
+            ORDER BY lastChanged DESC, id DESC
+        `);
 
-    let cursorTs = 0;
-    let cursorId = null;
+        let cursorTs = 0;
+        let cursorId = null;
 
-    if (cursorResult.recordset.length > 0) {
-        cursorTs = cursorResult.recordset[0].lastChanged;
-        cursorId = cursorResult.recordset[0].id;
-    }
-
-    console.log(`${logPrefix} Cursor: lastChanged=${cursorTs}, lastId=${cursorId || 'NONE'}`);
-
-    let hasMore = true;
-    let totalSynced = 0;
-
-    while (hasMore) {
-        const whereClause = cursorId
-            ? `((${recordKey}.lastChanged = ${cursorTs} AND ${recordKey}.id > '${cursorId}') OR (${recordKey}.lastChanged > ${cursorTs}))`
-            : `${recordKey}.lastChanged >= ${cursorTs}`;
-
-        const queryUrl = `${process.env.FSM_QUERY_URL}?account=${process.env.FSM_ACCOUNT}&company=${process.env.FSM_COMPANY}&dtos=${entityName}.${dtoVersion}&page=1&pageSize=500`;
-        const query = { query: `SELECT ${fields.join(', ')} FROM ${entityName} ${recordKey} WHERE ${whereClause} ORDER BY ${recordKey}.lastChanged ASC, ${recordKey}.id ASC` };
-
-        const response = await fetch(queryUrl, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                'X-Client-ID': 'FSM-Azure-Sync-DeepPagination',
-                'X-Client-Version': '1.2.1'
-            },
-            body: JSON.stringify(query)
-        });
-
-        if (!response.ok) throw new Error(`${entityName} Query failed: ${await response.text()}`);
-        const pageData = await response.json();
-
-        if (pageData.data && pageData.data.length > 0) {
-            for (const record of pageData.data) {
-                const data = record[recordKey];
-                const request = pool.request();
-                const columns = [];
-
-                for (const key in data) {
-                    if (key === 'udfValues' || key === 'id') continue;
-                    let val = data[key];
-
-                    if (key === 'nameTranslations' && val && typeof val === 'object') {
-                        for (const lang in val) {
-                            const colName = `nameTranslations_${lang}`;
-                            request.input(colName, stringify(val[lang]));
-                            columns.push(colName);
-                        }
-                        continue;
-                    }
-
-                    if (key === 'object' && val && typeof val === 'object') {
-                        request.input('objectId', stringify(val.objectId));
-                        request.input('objectType', stringify(val.objectType));
-                        columns.push('objectId', 'objectType');
-                        continue;
-                    }
-
-                    if (key === 'reservedMaterials' && Array.isArray(val)) {
-                        for (let i = 0; i <= 1; i++) {
-                            const colName = `reservedMaterial${i}`;
-                            request.input(colName, val[i] ? stringify(val[i]) : null);
-                            columns.push(colName);
-                        }
-                        continue;
-                    }
-
-                    if (typeof val === 'object' && val !== null && val.objectId) val = val.objectId;
-                    else val = stringify(val);
-
-                    request.input(key, val);
-                    columns.push(key);
-                }
-
-                if (data.udfValues) {
-                    const udfCounts = { 'BusinessPartner': 3, 'Activity': 13, 'Equipment': 8, 'ServiceCall': 18, 'Material': 7 };
-                    const maxUdf = udfCounts[entityName] !== undefined ? udfCounts[entityName] : 10;
-                    for (let i = 0; i <= maxUdf; i++) {
-                        const udf = data.udfValues[i] || { meta: null, value: null };
-                        request.input(`udf${i}_meta`, udf.meta);
-                        request.input(`udf${i}_value`, udf.value);
-                        columns.push(`udf${i}_meta`, `udf${i}_value`);
-                    }
-                }
-
-                for (const col of columns) {
-                    const cacheKey = `${lastSyncTable}.${col}`;
-                    if (!checkedColumns.has(cacheKey)) {
-                        await pool.request().query(`
-                            IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = '${col}')
-                            ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD [${col}] NVARCHAR(MAX)
-                        `);
-                        checkedColumns.add(cacheKey);
-                    }
-                }
-
-                if (!checkedColumns.has(`${lastSyncTable}.lastSync`)) {
-                    await pool.request().query(`IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = 'lastSync') ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD lastSync DATETIME`);
-                    checkedColumns.add(`${lastSyncTable}.lastSync`);
-                }
-
-                const updateSet = columns.map(col => `[${col}] = @${col}`).join(', ') + ', lastSync = GETDATE()';
-                request.input('id_pk', data.id);
-                try {
-                    await request.query(`MERGE INTO [${SCHEMA}].[${lastSyncTable}] AS target USING (SELECT @id_pk AS id) AS source ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET ${updateSet} WHEN NOT MATCHED THEN INSERT (id, ${columns.join(', ')}) VALUES (@id_pk, ${columns.map(c => `@${c}`).join(', ')});`);
-                } catch (e) {
-                    console.error(`${logPrefix} Merge Error on row ${data.id}: ${e.message}`);
-                }
-
-                cursorTs = data.lastChanged;
-                cursorId = data.id;
-            }
-            totalSynced += pageData.data.length;
-            console.log(`${logPrefix} Batch Processed: ${pageData.data.length}. Progress: ${totalSynced}`);
-        } else {
-            hasMore = false;
+        if (cursorResult.recordset.length > 0) {
+            cursorTs = cursorResult.recordset[0].lastChanged;
+            cursorId = cursorResult.recordset[0].id;
         }
+
+        console.log(`${logPrefix} Cursor: lastChanged=${cursorTs}, lastId=${cursorId || 'NONE'}`);
+
+        let hasMore = true;
+        let totalSynced = 0;
+
+        while (hasMore) {
+            const whereClause = cursorId
+                ? `((${recordKey}.lastChanged = ${cursorTs} AND ${recordKey}.id > '${cursorId}') OR (${recordKey}.lastChanged > ${cursorTs}))`
+                : `${recordKey}.lastChanged >= ${cursorTs}`;
+
+            const queryUrl = `${process.env.FSM_QUERY_URL}?account=${process.env.FSM_ACCOUNT}&company=${process.env.FSM_COMPANY}&dtos=${entityName}.${dtoVersion}&page=1&pageSize=500`;
+            const query = { query: `SELECT ${fields.join(', ')} FROM ${entityName} ${recordKey} WHERE ${whereClause} ORDER BY ${recordKey}.lastChanged ASC, ${recordKey}.id ASC` };
+
+            const response = await fetch(queryUrl, {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${token}`,
+                    'Content-Type': 'application/json',
+                    'X-Client-ID': 'FSM-Azure-Sync-DeepPagination',
+                    'X-Client-Version': '1.2.2'
+                },
+                body: JSON.stringify(query)
+            });
+
+            if (!response.ok) throw new Error(`Query failed: ${await response.text()}`);
+            const pageData = await response.json();
+
+            if (pageData.data && pageData.data.length > 0) {
+                for (const record of pageData.data) {
+                    const data = record[recordKey];
+                    const request = pool.request();
+                    const columns = [];
+
+                    for (const key in data) {
+                        if (key === 'udfValues' || key === 'id') continue;
+                        let val = data[key];
+
+                        if (key === 'nameTranslations' && val && typeof val === 'object') {
+                            for (const lang in val) {
+                                const colName = `nameTranslations_${lang}`;
+                                request.input(colName, stringify(val[lang]));
+                                columns.push(colName);
+                            }
+                            continue;
+                        }
+
+                        if (key === 'object' && val && typeof val === 'object') {
+                            request.input('objectId', stringify(val.objectId));
+                            request.input('objectType', stringify(val.objectType));
+                            columns.push('objectId', 'objectType');
+                            continue;
+                        }
+
+                        if (key === 'reservedMaterials' && Array.isArray(val)) {
+                            for (let i = 0; i <= 1; i++) {
+                                const colName = `reservedMaterial${i}`;
+                                request.input(colName, val[i] ? stringify(val[i]) : null);
+                                columns.push(colName);
+                            }
+                            continue;
+                        }
+
+                        if (typeof val === 'object' && val !== null && val.objectId) val = val.objectId;
+                        else val = stringify(val);
+
+                        request.input(key, val);
+                        columns.push(key);
+                    }
+
+                    if (data.udfValues) {
+                        const udfCounts = { 'BusinessPartner': 3, 'Activity': 13, 'Equipment': 8, 'ServiceCall': 18, 'Material': 7, 'Item': 10 };
+                        const maxUdf = udfCounts[entityName] !== undefined ? udfCounts[entityName] : 10;
+                        for (let i = 0; i <= maxUdf; i++) {
+                            const udf = data.udfValues[i] || { meta: null, value: null };
+                            request.input(`udf${i}_meta`, udf.meta);
+                            request.input(`udf${i}_value`, udf.value);
+                            columns.push(`udf${i}_meta`, `udf${i}_value`);
+                        }
+                    }
+
+                    for (const col of columns) {
+                        const cacheKey = `${lastSyncTable}.${col}`;
+                        if (!checkedColumns.has(cacheKey)) {
+                            await pool.request().query(`
+                                IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = '${col}')
+                                ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD [${col}] NVARCHAR(MAX)
+                            `);
+                            checkedColumns.add(cacheKey);
+                        }
+                    }
+
+                    if (!checkedColumns.has(`${lastSyncTable}.lastSync`)) {
+                        await pool.request().query(`IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = 'lastSync') ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD lastSync DATETIME`);
+                        checkedColumns.add(`${lastSyncTable}.lastSync`);
+                    }
+
+                    const updateSet = columns.map(col => `[${col}] = @${col}`).join(', ') + ', lastSync = GETDATE()';
+                    const colList = columns.map(col => `[${col}]`).join(', ');
+                    const valList = columns.map(col => `@${col}`).join(', ');
+
+                    request.input('id_pk', data.id);
+                    try {
+                        await request.query(`MERGE INTO [${SCHEMA}].[${lastSyncTable}] AS target USING (SELECT @id_pk AS id) AS source ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET ${updateSet} WHEN NOT MATCHED THEN INSERT (id, ${colList}) VALUES (@id_pk, ${valList});`);
+                    } catch (e) {
+                        console.error(`${logPrefix} Merge Error on row ${data.id}: ${e.message}`);
+                        // If merge fails, we still want to move the cursor to avoid infinite loop on broken record
+                    }
+
+                    cursorTs = data.lastChanged;
+                    cursorId = data.id;
+                }
+                totalSynced += pageData.data.length;
+                console.log(`${logPrefix} Batch Processed: ${pageData.data.length}. Progress: ${totalSynced}`);
+            } else {
+                hasMore = false;
+            }
+        }
+        console.log(`${logPrefix} Sync Finished. Total: ${totalSynced}`);
+    } catch (err) {
+        console.error(`${logPrefix} FATAL THREAD ERROR: ${err.message}`);
     }
-    console.log(`${logPrefix} Sync Finished. Total: ${totalSynced}`);
 }
 
 async function main() {
