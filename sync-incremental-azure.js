@@ -47,7 +47,13 @@ const BP_FIELDS = ['bp.id', 'bp.code', 'bp.name', 'bp.externalId', 'bp.type', 'b
 const EP_FIELDS = ['eq.businessPartner', 'eq.code', 'eq.createDateTime', 'eq.externalId', 'eq.globalUniqueId', 'eq.id', 'eq.inactive', 'eq.item', 'eq.lastChanged', 'eq.name', 'eq.syncStatus', 'eq.tool', 'eq.udfValues'];
 const TE_FIELDS = ['te.id', 'te.activity', 'te.item', 'te.startDateTime', 'te.endDateTime', 'te.durationInMinutes', 'te.externalId', 'te.lastChanged', 'te.lastChangedBy'];
 const MA_FIELDS = ['ma.id', 'ma.activity', 'ma.item', 'ma.quantity', 'ma.externalId', 'ma.lastChanged', 'ma.lastChangedBy'];
-const IT_FIELDS = ['it.id', 'it.code', 'it.name', 'it.itemGroup', 'it.externalId', 'it.lastChanged', 'it.lastChangedBy'];
+const IT_FIELDS = [
+    'it.code', 'it.createDateTime', 'it.externalId', 'it.groupCode', 'it.id',
+    'it.inactive', 'it.inventoryItem', 'it.lastChanged', 'it.lastChangedBy',
+    'it.name', 'it.nameTranslations', 'it.purchaseItem', 'it.salesItem',
+    'it.serialNumberItem', 'it.syncStatus', 'it.tool', 'it.typeCode',
+    'it.typeName', 'it.unitOfMeasure'
+];
 
 async function getFSMToken() {
     const auth = Buffer.from(`${process.env.FSM_CLIENT_ID}:${process.env.FSM_CLIENT_SECRET}`).toString('base64');
@@ -142,6 +148,17 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
                 for (const key in data) {
                     if (key === 'udfValues') continue;
                     let val = data[key];
+
+                    if (key === 'nameTranslations' && val && typeof val === 'object') {
+                        // Flatten translations
+                        for (const lang in val) {
+                            const colName = `nameTranslations_${lang}`;
+                            request.input(colName, stringify(val[lang]));
+                            columns.push(colName);
+                        }
+                        continue;
+                    }
+
                     if (typeof val === 'object' && val !== null && val.objectId) val = val.objectId; // Map Identifier to ID
                     else val = stringify(val);
 
