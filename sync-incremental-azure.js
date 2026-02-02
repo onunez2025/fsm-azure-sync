@@ -13,7 +13,7 @@ const config = {
         trustServerCertificate: false
     },
     pool: {
-        max: 10,
+        max: 15, // Increased for parallel sync
         min: 0,
         idleTimeoutMillis: 30000
     }
@@ -86,7 +86,7 @@ const stringify = (val) => {
 };
 
 async function ensureSchemaAndMigration(pool) {
-    console.log(`Ensuring schema [${SCHEMA}] exists...`);
+    console.log(`[SYS] Ensuring schema [${SCHEMA}] exists...`);
     await pool.request().query(`IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = '${SCHEMA}') EXEC('CREATE SCHEMA [${SCHEMA}]')`);
 
     const tables = [
@@ -106,7 +106,7 @@ async function ensureSchemaAndMigration(pool) {
         `);
 
         if (checkMigration.recordset[0].needsMigration) {
-            console.log(`Migrating table dbo.${table.name} to ${SCHEMA}.${table.name}...`);
+            console.log(`[SYS] Migrating table dbo.${table.name} to ${SCHEMA}.${table.name}...`);
             await pool.request().query(`ALTER SCHEMA [${SCHEMA}] TRANSFER [dbo].[${table.name}]`);
         }
 
@@ -117,9 +117,9 @@ async function ensureSchemaAndMigration(pool) {
 const checkedColumns = new Set();
 
 async function genericSync(pool, token, entityName, dtoVersion, fields, lastSyncTable, recordKey) {
-    console.log(`--- Starting Deep Sync for ${entityName} ---`);
+    const logPrefix = `[${entityName.padEnd(15)}]`;
+    console.log(`${logPrefix} Starting Deep Sync...`);
 
-    // Get the maximum lastChanged and the ID associated with it to build a unique cursor
     const cursorResult = await pool.request().query(`
         SELECT TOP 1 lastChanged, id FROM [${SCHEMA}].[${lastSyncTable}] 
         ORDER BY lastChanged DESC, id DESC
@@ -133,14 +133,12 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
         cursorId = cursorResult.recordset[0].id;
     }
 
-    console.log(`Cursor for ${entityName}: lastChanged=${cursorTs}, lastId=${cursorId || 'NONE'}`);
+    console.log(`${logPrefix} Cursor: lastChanged=${cursorTs}, lastId=${cursorId || 'NONE'}`);
 
     let hasMore = true;
     let totalSynced = 0;
 
     while (hasMore) {
-        // Build the where clause for Deep Pagination
-        // (lastChanged = :lastTs AND id > :lastId) OR (lastChanged > :lastTs)
         const whereClause = cursorId
             ? `((${recordKey}.lastChanged = ${cursorTs} AND ${recordKey}.id > '${cursorId}') OR (${recordKey}.lastChanged > ${cursorTs}))`
             : `${recordKey}.lastChanged >= ${cursorTs}`;
@@ -154,7 +152,7 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json',
                 'X-Client-ID': 'FSM-Azure-Sync-DeepPagination',
-                'X-Client-Version': '1.2.0'
+                'X-Client-Version': '1.2.1'
             },
             body: JSON.stringify(query)
         });
@@ -233,23 +231,26 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
 
                 const updateSet = columns.map(col => `[${col}] = @${col}`).join(', ') + ', lastSync = GETDATE()';
                 request.input('id_pk', data.id);
-                await request.query(`MERGE INTO [${SCHEMA}].[${lastSyncTable}] AS target USING (SELECT @id_pk AS id) AS source ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET ${updateSet} WHEN NOT MATCHED THEN INSERT (id, ${columns.join(', ')}) VALUES (@id_pk, ${columns.map(c => `@${c}`).join(', ')});`);
+                try {
+                    await request.query(`MERGE INTO [${SCHEMA}].[${lastSyncTable}] AS target USING (SELECT @id_pk AS id) AS source ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET ${updateSet} WHEN NOT MATCHED THEN INSERT (id, ${columns.join(', ')}) VALUES (@id_pk, ${columns.map(c => `@${c}`).join(', ')});`);
+                } catch (e) {
+                    console.error(`${logPrefix} Merge Error on row ${data.id}: ${e.message}`);
+                }
 
-                // Update local cursor to the current record
                 cursorTs = data.lastChanged;
                 cursorId = data.id;
             }
             totalSynced += pageData.data.length;
-            console.log(`Batch processed: ${pageData.data.length} records. Total synced for ${entityName}: ${totalSynced}`);
+            console.log(`${logPrefix} Batch Processed: ${pageData.data.length}. Progress: ${totalSynced}`);
         } else {
             hasMore = false;
         }
     }
-    console.log(`--- Finished Deep Sync for ${entityName} ---`);
+    console.log(`${logPrefix} Sync Finished. Total: ${totalSynced}`);
 }
 
 async function main() {
-    console.log('--- STARTING DEP-PAGINATION CONTINUOUS SYNC ---');
+    console.log('--- STARTING PARALLEL DEP-PAGINATION SYNC ---');
     if (!process.env.DB_SERVER) { console.error('FATAL ERROR: DB_SERVER is not defined.'); process.exit(1); }
 
     let pool;
@@ -260,23 +261,28 @@ async function main() {
         while (true) {
             try {
                 const token = await getFSMToken();
-                console.log(`\nNew Sync Cycle Started at ${new Date().toLocaleString()}`);
+                console.log(`\n[SYS] New Global Cycle Started: ${new Date().toLocaleString()}`);
 
-                await genericSync(pool, token, 'ServiceCall', '27', SC_FIELDS, 'ServiceCallsFSM', 'sc');
-                await genericSync(pool, token, 'Activity', '43', AC_FIELDS, 'ActivitiesFSM', 'ac');
-                await genericSync(pool, token, 'BusinessPartner', '25', BP_FIELDS, 'BusinessPartnersFSM', 'bp');
-                await genericSync(pool, token, 'Equipment', '24', EP_FIELDS, 'EquipmentsFSM', 'eq');
-                await genericSync(pool, token, 'Material', '21', MA_FIELDS, 'MaterialsFSM', 'mt');
-                await genericSync(pool, token, 'Item', '17', IT_FIELDS, 'ItemsFSM', 'it');
+                // Run all syncs in parallel to prevent bottlenecks
+                const syncs = [
+                    genericSync(pool, token, 'ServiceCall', '27', SC_FIELDS, 'ServiceCallsFSM', 'sc'),
+                    genericSync(pool, token, 'Activity', '43', AC_FIELDS, 'ActivitiesFSM', 'ac'),
+                    genericSync(pool, token, 'BusinessPartner', '25', BP_FIELDS, 'BusinessPartnersFSM', 'bp'),
+                    genericSync(pool, token, 'Equipment', '24', EP_FIELDS, 'EquipmentsFSM', 'eq'),
+                    genericSync(pool, token, 'Material', '21', MA_FIELDS, 'MaterialsFSM', 'mt'),
+                    genericSync(pool, token, 'Item', '17', IT_FIELDS, 'ItemsFSM', 'it')
+                ];
 
-                console.log('\nCycle Complete. Waiting 1 minute...');
+                await Promise.allSettled(syncs);
+
+                console.log('\n[SYS] Global Cycle Complete. Next run in 1 minute...');
             } catch (cycleError) {
-                console.error('Cycle Error:', cycleError.message);
+                console.error('[SYS] Global Cycle Error:', cycleError.message);
             }
             await new Promise(resolve => setTimeout(resolve, 60000));
         }
     } catch (fatalError) {
-        console.error('FATAL ERROR:', fatalError.message);
+        console.error('[SYS] FATAL ERROR:', fatalError.message);
     } finally {
         if (pool) await pool.close();
     }
