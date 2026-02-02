@@ -247,11 +247,11 @@ async function main() {
                 await genericSync(pool, token, 'Material', '21', MA_FIELDS, 'MaterialsFSM', 'mt');
                 await genericSync(pool, token, 'Item', '17', IT_FIELDS, 'ItemsFSM', 'it');
 
-                console.log('\nCycle Complete. Waiting 2 minutes...');
+                console.log('\nCycle Complete. Waiting 1 minute...');
             } catch (cycleError) {
                 console.error('Cycle Error:', cycleError.message);
             }
-            await new Promise(resolve => setTimeout(resolve, 120000));
+            await new Promise(resolve => setTimeout(resolve, 60000));
         }
     } catch (fatalError) {
         console.error('FATAL ERROR:', fatalError.message);
