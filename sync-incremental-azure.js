@@ -46,7 +46,12 @@ const AC_FIELDS = [
 const BP_FIELDS = ['bp.id', 'bp.code', 'bp.name', 'bp.externalId', 'bp.type', 'bp.inactive', 'bp.lastChanged', 'bp.lastChangedBy', 'bp.status', 'bp.udfValues'];
 const EP_FIELDS = ['eq.businessPartner', 'eq.code', 'eq.createDateTime', 'eq.externalId', 'eq.globalUniqueId', 'eq.id', 'eq.inactive', 'eq.item', 'eq.lastChanged', 'eq.name', 'eq.syncStatus', 'eq.tool', 'eq.udfValues'];
 const TE_FIELDS = ['te.id', 'te.activity', 'te.item', 'te.startDateTime', 'te.endDateTime', 'te.durationInMinutes', 'te.externalId', 'te.lastChanged', 'te.lastChangedBy'];
-const MA_FIELDS = ['ma.id', 'ma.activity', 'ma.item', 'ma.quantity', 'ma.externalId', 'ma.lastChanged', 'ma.lastChangedBy'];
+const MA_FIELDS = [
+    'mt.chargeOption', 'mt.createDateTime', 'mt.createPerson', 'mt.date',
+    'mt.equipment', 'mt.id', 'mt.inactive', 'mt.item', 'mt.lastChanged',
+    'mt.lastChangedBy', 'mt.object', 'mt.quantity', 'mt.remarks',
+    'mt.reservedMaterials', 'mt.syncStatus', 'mt.udfValues', 'mt.warehouse'
+];
 const IT_FIELDS = [
     'it.code', 'it.createDateTime', 'it.externalId', 'it.groupCode', 'it.id',
     'it.inactive', 'it.inventoryItem', 'it.lastChanged', 'it.lastChangedBy',
@@ -159,6 +164,22 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
                         continue;
                     }
 
+                    if (key === 'object' && val && typeof val === 'object') {
+                        request.input('objectId', stringify(val.objectId));
+                        request.input('objectType', stringify(val.objectType));
+                        columns.push('objectId', 'objectType');
+                        continue;
+                    }
+
+                    if (key === 'reservedMaterials' && Array.isArray(val)) {
+                        for (let i = 0; i <= 1; i++) {
+                            const colName = `reservedMaterial${i}`;
+                            request.input(colName, val[i] ? stringify(val[i]) : null);
+                            columns.push(colName);
+                        }
+                        continue;
+                    }
+
                     if (typeof val === 'object' && val !== null && val.objectId) val = val.objectId; // Map Identifier to ID
                     else val = stringify(val);
 
@@ -168,7 +189,7 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
 
                 // Add UDFs if present
                 if (data.udfValues) {
-                    const udfCounts = { 'BusinessPartner': 18, 'Activity': 13, 'Equipment': 8, 'ServiceCall': 18 };
+                    const udfCounts = { 'BusinessPartner': 18, 'Activity': 13, 'Equipment': 8, 'ServiceCall': 18, 'Material': 7 };
                     const maxUdf = udfCounts[entityName] !== undefined ? udfCounts[entityName] : 10;
                     for (let i = 0; i <= maxUdf; i++) {
                         const udf = data.udfValues[i] || { meta: null, value: null };
@@ -220,7 +241,7 @@ async function main() {
                 await genericSync(pool, token, 'BusinessPartner', '25', BP_FIELDS, 'BusinessPartnersFSM', 'bp');
                 await genericSync(pool, token, 'Equipment', '24', EP_FIELDS, 'EquipmentsFSM', 'eq');
                 await genericSync(pool, token, 'TimeEffort', '21', TE_FIELDS, 'TimeEffortsFSM', 'te');
-                await genericSync(pool, token, 'Material', '21', MA_FIELDS, 'MaterialsFSM', 'ma');
+                await genericSync(pool, token, 'Material', '21', MA_FIELDS, 'MaterialsFSM', 'mt');
                 await genericSync(pool, token, 'Item', '17', IT_FIELDS, 'ItemsFSM', 'it');
 
                 console.log('Cycle Complete. Waiting 2 minutes...');
