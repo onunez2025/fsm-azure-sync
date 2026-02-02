@@ -44,7 +44,7 @@ const AC_FIELDS = [
 ];
 
 const BP_FIELDS = ['bp.id', 'bp.code', 'bp.name', 'bp.externalId', 'bp.type', 'bp.inactive', 'bp.lastChanged', 'bp.lastChangedBy', 'bp.status', 'bp.udfValues'];
-const EP_FIELDS = ['e.id', 'e.code', 'e.name', 'e.serialNumber', 'e.businessPartner', 'e.externalId', 'e.lastChanged', 'e.lastChangedBy', 'e.udfValues'];
+const EP_FIELDS = ['eq.businessPartner', 'eq.code', 'eq.createDateTime', 'eq.externalId', 'eq.globalUniqueId', 'eq.id', 'eq.inactive', 'eq.item', 'eq.lastChanged', 'eq.name', 'eq.syncStatus', 'eq.tool', 'eq.udfValues'];
 const TE_FIELDS = ['te.id', 'te.activity', 'te.item', 'te.startDateTime', 'te.endDateTime', 'te.durationInMinutes', 'te.externalId', 'te.lastChanged', 'te.lastChangedBy'];
 const MA_FIELDS = ['ma.id', 'ma.activity', 'ma.item', 'ma.quantity', 'ma.externalId', 'ma.lastChanged', 'ma.lastChangedBy'];
 const IT_FIELDS = ['it.id', 'it.code', 'it.name', 'it.itemGroup', 'it.externalId', 'it.lastChanged', 'it.lastChangedBy'];
@@ -151,7 +151,8 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
 
                 // Add UDFs if present
                 if (data.udfValues) {
-                    const maxUdf = entityName === 'BusinessPartner' ? 18 : (entityName === 'Activity' ? 13 : 10);
+                    const udfCounts = { 'BusinessPartner': 18, 'Activity': 13, 'Equipment': 8, 'ServiceCall': 18 };
+                    const maxUdf = udfCounts[entityName] !== undefined ? udfCounts[entityName] : 10;
                     for (let i = 0; i <= maxUdf; i++) {
                         const udf = data.udfValues[i] || { meta: null, value: null };
                         request.input(`udf${i}_meta`, udf.meta);
@@ -200,7 +201,7 @@ async function main() {
                 await genericSync(pool, token, 'ServiceCall', '27', SC_FIELDS, 'ServiceCallsFSM', 'sc');
                 await genericSync(pool, token, 'Activity', '43', AC_FIELDS, 'ActivitiesFSM', 'ac');
                 await genericSync(pool, token, 'BusinessPartner', '25', BP_FIELDS, 'BusinessPartnersFSM', 'bp');
-                await genericSync(pool, token, 'Equipment', '24', EP_FIELDS, 'EquipmentsFSM', 'e');
+                await genericSync(pool, token, 'Equipment', '24', EP_FIELDS, 'EquipmentsFSM', 'eq');
                 await genericSync(pool, token, 'TimeEffort', '21', TE_FIELDS, 'TimeEffortsFSM', 'te');
                 await genericSync(pool, token, 'Material', '21', MA_FIELDS, 'MaterialsFSM', 'ma');
                 await genericSync(pool, token, 'Item', '17', IT_FIELDS, 'ItemsFSM', 'it');
