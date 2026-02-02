@@ -253,6 +253,19 @@ async function syncActivities(pool, token) {
 
 async function main() {
     console.log('--- STARTING CONTINUOUS INCREMENTAL SYNC WITH SCHEMA SUPPORT ---');
+
+    // Debug Environment Variables (sanitized)
+    console.log('Verifying Config:');
+    console.log(`- DB_SERVER: ${process.env.DB_SERVER ? 'OK' : 'MISSING'}`);
+    console.log(`- DB_NAME: ${process.env.DB_NAME ? 'OK' : 'MISSING'}`);
+    console.log(`- DB_USER: ${process.env.DB_USER ? 'OK' : 'MISSING'}`);
+    console.log(`- FSM_CLIENT_ID: ${process.env.FSM_CLIENT_ID ? 'OK' : 'MISSING'}`);
+
+    if (!process.env.DB_SERVER) {
+        console.error('FATAL ERROR: DB_SERVER is not defined in environment variables.');
+        process.exit(1);
+    }
+
     let pool;
     try {
         pool = await mssql.connect(config);
