@@ -43,7 +43,12 @@ const AC_FIELDS = [
     'ac.type', 'ac.udfValues', 'ac.useAllEquipments'
 ];
 
-const BP_FIELDS = ['bp.id', 'bp.code', 'bp.name', 'bp.externalId', 'bp.type', 'bp.inactive', 'bp.lastChanged', 'bp.lastChangedBy', 'bp.status', 'bp.udfValues'];
+const BP_FIELDS = [
+    'bp.city', 'bp.code', 'bp.country', 'bp.createDateTime', 'bp.crowdType',
+    'bp.emailAddress', 'bp.externalId', 'bp.fax', 'bp.id', 'bp.inactive',
+    'bp.language', 'bp.lastChanged', 'bp.mobilePhone', 'bp.name',
+    'bp.officePhone', 'bp.remarks', 'bp.syncStatus', 'bp.type', 'bp.udfValues'
+];
 const EP_FIELDS = ['eq.businessPartner', 'eq.code', 'eq.createDateTime', 'eq.externalId', 'eq.globalUniqueId', 'eq.id', 'eq.inactive', 'eq.item', 'eq.lastChanged', 'eq.name', 'eq.syncStatus', 'eq.tool', 'eq.udfValues'];
 const TE_FIELDS = ['te.id', 'te.activity', 'te.item', 'te.startDateTime', 'te.endDateTime', 'te.durationInMinutes', 'te.externalId', 'te.lastChanged', 'te.lastChangedBy'];
 const MA_FIELDS = [
@@ -189,7 +194,7 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
 
                 // Add UDFs if present
                 if (data.udfValues) {
-                    const udfCounts = { 'BusinessPartner': 18, 'Activity': 13, 'Equipment': 8, 'ServiceCall': 18, 'Material': 7 };
+                    const udfCounts = { 'BusinessPartner': 3, 'Activity': 13, 'Equipment': 8, 'ServiceCall': 18, 'Material': 7 };
                     const maxUdf = udfCounts[entityName] !== undefined ? udfCounts[entityName] : 10;
                     for (let i = 0; i <= maxUdf; i++) {
                         const udf = data.udfValues[i] || { meta: null, value: null };
