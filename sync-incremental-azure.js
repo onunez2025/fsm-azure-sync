@@ -145,7 +145,7 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
             ? `((${recordKey}.lastChanged = ${cursorTs} AND ${recordKey}.id > '${cursorId}') OR (${recordKey}.lastChanged > ${cursorTs}))`
             : `${recordKey}.lastChanged >= ${cursorTs}`;
 
-        const queryUrl = `${process.env.FSM_QUERY_URL}?account=${process.env.FSM_ACCOUNT}&company=${process.env.FSM_COMPANY}&dtos=${entityName}.${dtoVersion}&pageSize=500`;
+        const queryUrl = `${process.env.FSM_QUERY_URL}?account=${process.env.FSM_ACCOUNT}&company=${process.env.FSM_COMPANY}&dtos=${entityName}.${dtoVersion}&page=1&pageSize=500`;
         const query = { query: `SELECT ${fields.join(', ')} FROM ${entityName} ${recordKey} WHERE ${whereClause} ORDER BY ${recordKey}.lastChanged ASC, ${recordKey}.id ASC` };
 
         const response = await fetch(queryUrl, {
