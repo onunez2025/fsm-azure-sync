@@ -43,6 +43,12 @@ const AC_FIELDS = [
     'ac.type', 'ac.udfValues', 'ac.useAllEquipments'
 ];
 
+const BP_FIELDS = ['bp.id', 'bp.code', 'bp.name', 'bp.externalId', 'bp.type', 'bp.inactive', 'bp.lastChanged', 'bp.lastChangedBy', 'bp.status', 'bp.udfValues'];
+const EP_FIELDS = ['e.id', 'e.code', 'e.name', 'e.serialNumber', 'e.businessPartner', 'e.externalId', 'e.lastChanged', 'e.lastChangedBy', 'e.udfValues'];
+const TE_FIELDS = ['te.id', 'te.activity', 'te.item', 'te.startDateTime', 'te.endDateTime', 'te.durationInMinutes', 'te.externalId', 'te.lastChanged', 'te.lastChangedBy'];
+const MA_FIELDS = ['ma.id', 'ma.activity', 'ma.item', 'ma.quantity', 'ma.externalId', 'ma.lastChanged', 'ma.lastChangedBy'];
+const IT_FIELDS = ['it.id', 'it.code', 'it.name', 'it.itemGroup', 'it.externalId', 'it.lastChanged', 'it.lastChangedBy'];
+
 async function getFSMToken() {
     const auth = Buffer.from(`${process.env.FSM_CLIENT_ID}:${process.env.FSM_CLIENT_SECRET}`).toString('base64');
     const response = await fetch(process.env.FSM_TOKEN_URL, {
@@ -68,34 +74,47 @@ async function ensureSchemaAndMigration(pool) {
     console.log(`Ensuring schema [${SCHEMA}] exists...`);
     await pool.request().query(`IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = '${SCHEMA}') EXEC('CREATE SCHEMA [${SCHEMA}]')`);
 
-    const tablesToMigrate = ['ServiceCallsFSM', 'ActivitiesFSM'];
-    for (const table of tablesToMigrate) {
-        const checkTable = await pool.request().query(`
-            IF EXISTS (SELECT * FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = 'dbo' AND t.name = '${table}')
-            AND NOT EXISTS (SELECT * FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${table}')
+    const tables = [
+        { name: 'ServiceCallsFSM', sql: `CREATE TABLE [${SCHEMA}].[ServiceCallsFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
+        { name: 'ActivitiesFSM', sql: `CREATE TABLE [${SCHEMA}].[ActivitiesFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
+        { name: 'BusinessPartnersFSM', sql: `CREATE TABLE [${SCHEMA}].[BusinessPartnersFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
+        { name: 'EquipmentsFSM', sql: `CREATE TABLE [${SCHEMA}].[EquipmentsFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
+        { name: 'TimeEffortsFSM', sql: `CREATE TABLE [${SCHEMA}].[TimeEffortsFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
+        { name: 'MaterialsFSM', sql: `CREATE TABLE [${SCHEMA}].[MaterialsFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
+        { name: 'ItemsFSM', sql: `CREATE TABLE [${SCHEMA}].[ItemsFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` }
+    ];
+
+    for (const table of tables) {
+        // Migration check
+        const checkMigration = await pool.request().query(`
+            IF EXISTS (SELECT * FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = 'dbo' AND t.name = '${table.name}')
+            AND NOT EXISTS (SELECT * FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${table.name}')
             SELECT 1 as needsMigration ELSE SELECT 0 as needsMigration
         `);
 
-        if (checkTable.recordset[0].needsMigration) {
-            console.log(`Migrating table dbo.${table} to ${SCHEMA}.${table}...`);
-            await pool.request().query(`ALTER SCHEMA [${SCHEMA}] TRANSFER [dbo].[${table}]`);
+        if (checkMigration.recordset[0].needsMigration) {
+            console.log(`Migrating table dbo.${table.name} to ${SCHEMA}.${table.name}...`);
+            await pool.request().query(`ALTER SCHEMA [${SCHEMA}] TRANSFER [dbo].[${table.name}]`);
         }
+
+        // Creation check
+        await pool.request().query(`IF NOT EXISTS (SELECT * FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${table.name}') ${table.sql}`);
     }
 }
 
-async function syncServiceCalls(pool, token) {
-    console.log('--- Checking ServiceCall Deltas ---');
-    const result = await pool.request().query(`SELECT MAX(lastChanged) as maxTs FROM [${SCHEMA}].[ServiceCallsFSM]`);
+async function genericSync(pool, token, entityName, dtoVersion, fields, lastSyncTable, recordKey) {
+    console.log(`--- Checking ${entityName} Deltas ---`);
+    const result = await pool.request().query(`SELECT MAX(lastChanged) as maxTs FROM [${SCHEMA}].[${lastSyncTable}]`);
     const lastTs = result.recordset[0].maxTs || 0;
-    console.log(`Last ServiceCall Sync Timestamp: ${lastTs}`);
+    console.log(`Last ${entityName} Sync Timestamp: ${lastTs}`);
 
     let currentPage = 1;
     let totalPages = 1;
 
     do {
-        console.log(`Fetching SC Page ${currentPage}...`);
-        const queryUrl = `${process.env.FSM_QUERY_URL}?account=${process.env.FSM_ACCOUNT}&company=${process.env.FSM_COMPANY}&dtos=ServiceCall.27&page=${currentPage}&pageSize=500`;
-        const query = { query: `SELECT ${SC_FIELDS.join(', ')} FROM ServiceCall sc WHERE sc.lastChanged > ${lastTs} ORDER BY sc.lastChanged ASC` };
+        console.log(`Fetching ${entityName} Page ${currentPage}...`);
+        const queryUrl = `${process.env.FSM_QUERY_URL}?account=${process.env.FSM_ACCOUNT}&company=${process.env.FSM_COMPANY}&dtos=${entityName}.${dtoVersion}&page=${currentPage}&pageSize=500`;
+        const query = { query: `SELECT ${fields.join(', ')} FROM ${entityName} ${recordKey} WHERE ${recordKey}.lastChanged > ${lastTs} ORDER BY ${recordKey}.lastChanged ASC` };
 
         const response = await fetch(queryUrl, {
             method: 'POST',
@@ -108,144 +127,55 @@ async function syncServiceCalls(pool, token) {
             body: JSON.stringify(query)
         });
 
-        if (!response.ok) throw new Error(`SC Query failed: ${await response.text()}`);
+        if (!response.ok) throw new Error(`${entityName} Query failed: ${await response.text()}`);
         const pageData = await response.json();
 
         if (currentPage === 1) totalPages = pageData.lastPage || 1;
 
         if (pageData.data && pageData.data.length > 0) {
             for (const record of pageData.data) {
-                const sc = record.sc;
+                const data = record[recordKey];
                 const request = pool.request();
-                request.input('id', mssql.NVarChar, sc.id);
-                request.input('businessPartner', mssql.NVarChar, stringify(sc.businessPartner));
-                request.input('chargeableEfforts', mssql.Bit, sc.chargeableEfforts);
-                request.input('chargeableExpenses', mssql.Bit, sc.chargeableExpenses);
-                request.input('chargeableMaterials', mssql.Bit, sc.chargeableMaterials);
-                request.input('chargeableMileages', mssql.Bit, sc.chargeableMileages);
-                request.input('code', mssql.NVarChar, sc.code);
-                request.input('createDateTime', mssql.DateTimeOffset, sc.createDateTime);
-                request.input('dueDateTime', mssql.DateTimeOffset, sc.dueDateTime);
-                request.input('durationInMinutes', mssql.Int, sc.durationInMinutes);
-                request.input('endDateTime', mssql.DateTimeOffset, sc.endDateTime);
-                request.input('externalId', mssql.NVarChar, sc.externalId);
-                request.input('inactive', mssql.Bit, sc.inactive);
-                request.input('lastChanged', mssql.BigInt, sc.lastChanged);
-                request.input('lastChangedBy', mssql.NVarChar, sc.lastChangedBy);
-                request.input('originCode', mssql.NVarChar, sc.originCode);
-                request.input('originName', mssql.NVarChar, sc.originName);
-                request.input('priority', mssql.NVarChar, sc.priority);
-                request.input('remarks', mssql.NVarChar, sc.remarks);
-                request.input('startDateTime', mssql.DateTimeOffset, sc.startDateTime);
-                request.input('statusCode', mssql.NVarChar, sc.statusCode);
-                request.input('statusName', mssql.NVarChar, sc.statusName);
-                request.input('subject', mssql.NVarChar, sc.subject);
-                request.input('syncStatus', mssql.NVarChar, sc.syncStatus);
-                request.input('typeCode', mssql.NVarChar, sc.typeCode);
-                request.input('typeName', mssql.NVarChar, sc.typeName);
-                request.input('equipment0', mssql.NVarChar, sc.equipments && sc.equipments.length > 0 ? stringify(sc.equipments[0]) : null);
-                request.input('responsible0', mssql.NVarChar, sc.responsibles && sc.responsibles.length > 0 ? stringify(sc.responsibles[0]) : null);
+                const columns = [];
 
-                const baseCols = ['businessPartner', 'chargeableEfforts', 'chargeableExpenses', 'chargeableMaterials', 'chargeableMileages', 'code', 'createDateTime', 'dueDateTime', 'durationInMinutes', 'endDateTime', 'externalId', 'inactive', 'lastChanged', 'lastChangedBy', 'originCode', 'originName', 'priority', 'remarks', 'startDateTime', 'statusCode', 'statusName', 'subject', 'syncStatus', 'typeCode', 'typeName', 'equipment0', 'responsible0'];
-                for (let i = 0; i <= 18; i++) {
-                    const udf = sc.udfValues && sc.udfValues[i] ? sc.udfValues[i] : { meta: null, value: null };
-                    request.input(`udf${i}_meta`, mssql.NVarChar, udf.meta);
-                    request.input(`udf${i}_value`, mssql.NVarChar, udf.value);
-                    baseCols.push(`udf${i}_meta`, `udf${i}_value`);
+                // Add all specific fields
+                for (const key in data) {
+                    if (key === 'udfValues') continue;
+                    let val = data[key];
+                    if (typeof val === 'object' && val !== null && val.objectId) val = val.objectId; // Map Identifier to ID
+                    else val = stringify(val);
+
+                    request.input(key, val);
+                    columns.push(key);
                 }
 
-                const updateSet = baseCols.map(col => `${col} = @${col}`).join(', ') + ', lastSync = GETDATE()';
-                await request.query(`MERGE INTO [${SCHEMA}].[ServiceCallsFSM] AS target USING (SELECT @id AS id) AS source ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET ${updateSet} WHEN NOT MATCHED THEN INSERT (id, ${baseCols.join(', ')}) VALUES (@id, ${baseCols.map(c => `@${c}`).join(', ')});`);
-            }
-            console.log(`Synced ${pageData.data.length} ServiceCalls.`);
-        }
-        currentPage++;
-    } while (currentPage <= totalPages);
-}
-
-async function syncActivities(pool, token) {
-    console.log('--- Checking Activity Deltas ---');
-    const result = await pool.request().query(`SELECT MAX(lastChanged) as maxTs FROM [${SCHEMA}].[ActivitiesFSM]`);
-    const lastTs = result.recordset[0].maxTs || 0;
-    console.log(`Last Activity Sync Timestamp: ${lastTs}`);
-
-    let currentPage = 1;
-    let totalPages = 1;
-
-    do {
-        console.log(`Fetching AC Page ${currentPage}...`);
-        const queryUrl = `${process.env.FSM_QUERY_URL}?account=${process.env.FSM_ACCOUNT}&company=${process.env.FSM_COMPANY}&dtos=Activity.43&page=${currentPage}&pageSize=500`;
-        const query = { query: `SELECT ${AC_FIELDS.join(', ')} FROM Activity ac WHERE ac.lastChanged > ${lastTs} ORDER BY ac.lastChanged ASC` };
-
-        const response = await fetch(queryUrl, {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json',
-                'X-Client-ID': 'FSM-Azure-Sync-Incremental',
-                'X-Client-Version': '1.1.0'
-            },
-            body: JSON.stringify(query)
-        });
-
-        if (!response.ok) throw new Error(`AC Query failed: ${await response.text()}`);
-        const pageData = await response.json();
-
-        if (currentPage === 1) totalPages = pageData.lastPage || 1;
-
-        if (pageData.data && pageData.data.length > 0) {
-            for (const record of pageData.data) {
-                const ac = record.ac;
-                const request = pool.request();
-                request.input('id', mssql.NVarChar, ac.id);
-                request.input('address', mssql.NVarChar, stringify(ac.address));
-                request.input('businessPartner', mssql.NVarChar, stringify(ac.businessPartner));
-                request.input('checkedOut', mssql.Bit, ac.checkedOut);
-                request.input('code', mssql.NVarChar, ac.code);
-                request.input('createDateTime', mssql.DateTimeOffset, ac.createDateTime);
-                request.input('createPerson', mssql.NVarChar, stringify(ac.createPerson));
-                request.input('dueDateTime', mssql.DateTimeOffset, ac.dueDateTime);
-                request.input('durationInMinutes', mssql.Int, ac.durationInMinutes);
-                request.input('earliestStartDateTime', mssql.DateTimeOffset, ac.earliestStartDateTime);
-                request.input('endDateTime', mssql.DateTimeOffset, ac.endDateTime);
-                request.input('equipment', mssql.NVarChar, stringify(ac.equipment));
-                request.input('executionStage', mssql.NVarChar, ac.executionStage);
-                request.input('externalId', mssql.NVarChar, ac.externalId);
-                request.input('inactive', mssql.Bit, ac.inactive);
-                request.input('lastChanged', mssql.BigInt, ac.lastChanged);
-                request.input('lastChangedBy', mssql.NVarChar, ac.lastChangedBy);
-                request.input('milestone', mssql.Bit, ac.milestone);
-                request.input('objectId', mssql.NVarChar, ac.object ? ac.object.objectId : null);
-                request.input('objectType', mssql.NVarChar, ac.object ? ac.object.objectType : null);
-                request.input('personal', mssql.Bit, ac.personal);
-                request.input('plannedDurationInMinutes', mssql.Int, ac.plannedDurationInMinutes);
-                request.input('plannedDurationType', mssql.NVarChar, ac.plannedDurationType);
-                request.input('projectOrdinal', mssql.Int, ac.projectOrdinal);
-                request.input('region', mssql.NVarChar, stringify(ac.region));
-                request.input('remarks', mssql.NVarChar, ac.remarks);
-                request.input('startDateTime', mssql.DateTimeOffset, ac.startDateTime);
-                request.input('status', mssql.NVarChar, ac.status);
-                request.input('statusChangeReason', mssql.NVarChar, ac.statusChangeReason);
-                request.input('subject', mssql.NVarChar, ac.subject);
-                request.input('syncStatus', mssql.NVarChar, ac.syncStatus);
-                request.input('travelTimeFromInMinutes', mssql.Int, ac.travelTimeFromInMinutes);
-                request.input('travelTimeToInMinutes', mssql.Int, ac.travelTimeToInMinutes);
-                request.input('type', mssql.NVarChar, ac.type);
-                request.input('useAllEquipments', mssql.Bit, ac.useAllEquipments);
-                request.input('responsible0', mssql.NVarChar, ac.responsibles && ac.responsibles.length > 0 ? stringify(ac.responsibles[0]) : null);
-
-                const baseCols = ['address', 'businessPartner', 'checkedOut', 'code', 'createDateTime', 'createPerson', 'dueDateTime', 'durationInMinutes', 'earliestStartDateTime', 'endDateTime', 'equipment', 'executionStage', 'externalId', 'inactive', 'lastChanged', 'lastChangedBy', 'milestone', 'objectId', 'objectType', 'personal', 'plannedDurationInMinutes', 'plannedDurationType', 'projectOrdinal', 'region', 'remarks', 'startDateTime', 'status', 'statusChangeReason', 'subject', 'syncStatus', 'travelTimeFromInMinutes', 'travelTimeToInMinutes', 'type', 'useAllEquipments', 'responsible0'];
-                for (let i = 0; i <= 13; i++) {
-                    const udf = ac.udfValues && ac.udfValues[i] ? ac.udfValues[i] : { meta: null, value: null };
-                    request.input(`udf${i}_meta`, mssql.NVarChar, udf.meta);
-                    request.input(`udf${i}_value`, mssql.NVarChar, udf.value);
-                    baseCols.push(`udf${i}_meta`, `udf${i}_value`);
+                // Add UDFs if present
+                if (data.udfValues) {
+                    const maxUdf = entityName === 'BusinessPartner' ? 18 : (entityName === 'Activity' ? 13 : 10);
+                    for (let i = 0; i <= maxUdf; i++) {
+                        const udf = data.udfValues[i] || { meta: null, value: null };
+                        request.input(`udf${i}_meta`, udf.meta);
+                        request.input(`udf${i}_value`, udf.value);
+                        columns.push(`udf${i}_meta`, `udf${i}_value`);
+                    }
                 }
 
-                const updateSet = baseCols.map(col => `${col} = @${col}`).join(', ') + ', lastSync = GETDATE()';
-                await request.query(`MERGE INTO [${SCHEMA}].[ActivitiesFSM] AS target USING (SELECT @id AS id) AS source ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET ${updateSet} WHEN NOT MATCHED THEN INSERT (id, ${baseCols.join(', ')}) VALUES (@id, ${baseCols.map(c => `@${c}`).join(', ')});`);
+                // Ensure columns exist (Dynamically adding missing columns to table)
+                for (const col of columns) {
+                    await pool.request().query(`
+                        IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = '${col}')
+                        ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD [${col}] NVARCHAR(MAX)
+                    `);
+                }
+
+                // Add lastSync column if it doesn't exist
+                await pool.request().query(`IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = 'lastSync') ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD lastSync DATETIME`);
+
+                const updateSet = columns.map(col => `[${col}] = @${col}`).join(', ') + ', lastSync = GETDATE()';
+                request.input('id_pk', data.id);
+                await request.query(`MERGE INTO [${SCHEMA}].[${lastSyncTable}] AS target USING (SELECT @id_pk AS id) AS source ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET ${updateSet} WHEN NOT MATCHED THEN INSERT (id, ${columns.join(', ')}) VALUES (@id_pk, ${columns.map(c => `@${c}`).join(', ')});`);
             }
-            console.log(`Synced ${pageData.data.length} Activities.`);
+            console.log(`Synced ${pageData.data.length} ${entityName}.`);
         }
         currentPage++;
     } while (currentPage <= totalPages);
@@ -253,24 +183,13 @@ async function syncActivities(pool, token) {
 
 async function main() {
     console.log('--- STARTING CONTINUOUS INCREMENTAL SYNC WITH SCHEMA SUPPORT ---');
-
-    // Debug Environment Variables (sanitized)
     console.log('Verifying Config:');
     console.log(`- DB_SERVER: ${process.env.DB_SERVER ? 'OK' : 'MISSING'}`);
-    console.log(`- DB_NAME: ${process.env.DB_NAME ? 'OK' : 'MISSING'}`);
-    console.log(`- DB_USER: ${process.env.DB_USER ? 'OK' : 'MISSING'}`);
-    console.log(`- FSM_CLIENT_ID: ${process.env.FSM_CLIENT_ID ? 'OK' : 'MISSING'}`);
-
-    if (!process.env.DB_SERVER) {
-        console.error('FATAL ERROR: DB_SERVER is not defined in environment variables.');
-        process.exit(1);
-    }
+    if (!process.env.DB_SERVER) { console.error('FATAL ERROR: DB_SERVER is not defined.'); process.exit(1); }
 
     let pool;
     try {
         pool = await mssql.connect(config);
-
-        // One-time schema check and migration
         await ensureSchemaAndMigration(pool);
 
         while (true) {
@@ -278,8 +197,13 @@ async function main() {
                 const token = await getFSMToken();
                 console.log(`\nNew Sync Cycle Started at ${new Date().toLocaleString()}`);
 
-                await syncServiceCalls(pool, token);
-                await syncActivities(pool, token);
+                await genericSync(pool, token, 'ServiceCall', '27', SC_FIELDS, 'ServiceCallsFSM', 'sc');
+                await genericSync(pool, token, 'Activity', '43', AC_FIELDS, 'ActivitiesFSM', 'ac');
+                await genericSync(pool, token, 'BusinessPartner', '25', BP_FIELDS, 'BusinessPartnersFSM', 'bp');
+                await genericSync(pool, token, 'Equipment', '24', EP_FIELDS, 'EquipmentsFSM', 'e');
+                await genericSync(pool, token, 'TimeEffort', '21', TE_FIELDS, 'TimeEffortsFSM', 'te');
+                await genericSync(pool, token, 'Material', '21', MA_FIELDS, 'MaterialsFSM', 'ma');
+                await genericSync(pool, token, 'Item', '17', IT_FIELDS, 'ItemsFSM', 'it');
 
                 console.log('Cycle Complete. Waiting 2 minutes...');
             } catch (cycleError) {
