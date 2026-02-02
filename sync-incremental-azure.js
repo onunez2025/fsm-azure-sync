@@ -99,7 +99,6 @@ async function ensureSchemaAndMigration(pool) {
     ];
 
     for (const table of tables) {
-        // Migration check
         const checkMigration = await pool.request().query(`
             IF EXISTS (SELECT * FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = 'dbo' AND t.name = '${table.name}')
             AND NOT EXISTS (SELECT * FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${table.name}')
@@ -111,10 +110,11 @@ async function ensureSchemaAndMigration(pool) {
             await pool.request().query(`ALTER SCHEMA [${SCHEMA}] TRANSFER [dbo].[${table.name}]`);
         }
 
-        // Creation check
         await pool.request().query(`IF NOT EXISTS (SELECT * FROM sys.tables t JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${table.name}') ${table.sql}`);
     }
 }
+
+const checkedColumns = new Set();
 
 async function genericSync(pool, token, entityName, dtoVersion, fields, lastSyncTable, recordKey) {
     console.log(`--- Checking ${entityName} Deltas ---`);
@@ -152,13 +152,11 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
                 const request = pool.request();
                 const columns = [];
 
-                // Add all specific fields
                 for (const key in data) {
-                    if (key === 'udfValues') continue;
+                    if (key === 'udfValues' || key === 'id') continue;
                     let val = data[key];
 
                     if (key === 'nameTranslations' && val && typeof val === 'object') {
-                        // Flatten translations
                         for (const lang in val) {
                             const colName = `nameTranslations_${lang}`;
                             request.input(colName, stringify(val[lang]));
@@ -183,14 +181,13 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
                         continue;
                     }
 
-                    if (typeof val === 'object' && val !== null && val.objectId) val = val.objectId; // Map Identifier to ID
+                    if (typeof val === 'object' && val !== null && val.objectId) val = val.objectId;
                     else val = stringify(val);
 
                     request.input(key, val);
                     columns.push(key);
                 }
 
-                // Add UDFs if present
                 if (data.udfValues) {
                     const udfCounts = { 'BusinessPartner': 3, 'Activity': 13, 'Equipment': 8, 'ServiceCall': 18, 'Material': 7 };
                     const maxUdf = udfCounts[entityName] !== undefined ? udfCounts[entityName] : 10;
@@ -202,16 +199,21 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
                     }
                 }
 
-                // Ensure columns exist (Dynamically adding missing columns to table)
                 for (const col of columns) {
-                    await pool.request().query(`
-                        IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = '${col}')
-                        ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD [${col}] NVARCHAR(MAX)
-                    `);
+                    const cacheKey = `${lastSyncTable}.${col}`;
+                    if (!checkedColumns.has(cacheKey)) {
+                        await pool.request().query(`
+                            IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = '${col}')
+                            ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD [${col}] NVARCHAR(MAX)
+                        `);
+                        checkedColumns.add(cacheKey);
+                    }
                 }
 
-                // Add lastSync column if it doesn't exist
-                await pool.request().query(`IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = 'lastSync') ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD lastSync DATETIME`);
+                if (!checkedColumns.has(`${lastSyncTable}.lastSync`)) {
+                    await pool.request().query(`IF NOT EXISTS (SELECT * FROM sys.columns c JOIN sys.tables t ON c.object_id = t.object_id JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE s.name = '${SCHEMA}' AND t.name = '${lastSyncTable}' AND c.name = 'lastSync') ALTER TABLE [${SCHEMA}].[${lastSyncTable}] ADD lastSync DATETIME`);
+                    checkedColumns.add(`${lastSyncTable}.lastSync`);
+                }
 
                 const updateSet = columns.map(col => `[${col}] = @${col}`).join(', ') + ', lastSync = GETDATE()';
                 request.input('id_pk', data.id);
@@ -226,7 +228,6 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
 async function main() {
     console.log('--- STARTING CONTINUOUS INCREMENTAL SYNC WITH SCHEMA SUPPORT ---');
     console.log('Verifying Config:');
-    console.log(`- DB_SERVER: ${process.env.DB_SERVER ? 'OK' : 'MISSING'}`);
     if (!process.env.DB_SERVER) { console.error('FATAL ERROR: DB_SERVER is not defined.'); process.exit(1); }
 
     let pool;
@@ -246,7 +247,7 @@ async function main() {
                 await genericSync(pool, token, 'Material', '21', MA_FIELDS, 'MaterialsFSM', 'mt');
                 await genericSync(pool, token, 'Item', '17', IT_FIELDS, 'ItemsFSM', 'it');
 
-                console.log('Cycle Complete. Waiting 2 minutes...');
+                console.log('\nCycle Complete. Waiting 2 minutes...');
             } catch (cycleError) {
                 console.error('Cycle Error:', cycleError.message);
             }
