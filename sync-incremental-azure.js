@@ -117,34 +117,50 @@ async function ensureSchemaAndMigration(pool) {
 const checkedColumns = new Set();
 
 async function genericSync(pool, token, entityName, dtoVersion, fields, lastSyncTable, recordKey) {
-    console.log(`--- Checking ${entityName} Deltas ---`);
-    const result = await pool.request().query(`SELECT MAX(lastChanged) as maxTs FROM [${SCHEMA}].[${lastSyncTable}]`);
-    const lastTs = result.recordset[0].maxTs || 0;
-    console.log(`Last ${entityName} Sync Timestamp: ${lastTs}`);
+    console.log(`--- Starting Deep Sync for ${entityName} ---`);
 
-    let currentPage = 1;
-    let totalPages = 1;
+    // Get the maximum lastChanged and the ID associated with it to build a unique cursor
+    const cursorResult = await pool.request().query(`
+        SELECT TOP 1 lastChanged, id FROM [${SCHEMA}].[${lastSyncTable}] 
+        ORDER BY lastChanged DESC, id DESC
+    `);
 
-    do {
-        console.log(`Fetching ${entityName} Page ${currentPage}...`);
-        const queryUrl = `${process.env.FSM_QUERY_URL}?account=${process.env.FSM_ACCOUNT}&company=${process.env.FSM_COMPANY}&dtos=${entityName}.${dtoVersion}&page=${currentPage}&pageSize=500`;
-        const query = { query: `SELECT ${fields.join(', ')} FROM ${entityName} ${recordKey} WHERE ${recordKey}.lastChanged > ${lastTs} ORDER BY ${recordKey}.lastChanged ASC` };
+    let cursorTs = 0;
+    let cursorId = null;
+
+    if (cursorResult.recordset.length > 0) {
+        cursorTs = cursorResult.recordset[0].lastChanged;
+        cursorId = cursorResult.recordset[0].id;
+    }
+
+    console.log(`Cursor for ${entityName}: lastChanged=${cursorTs}, lastId=${cursorId || 'NONE'}`);
+
+    let hasMore = true;
+    let totalSynced = 0;
+
+    while (hasMore) {
+        // Build the where clause for Deep Pagination
+        // (lastChanged = :lastTs AND id > :lastId) OR (lastChanged > :lastTs)
+        const whereClause = cursorId
+            ? `((${recordKey}.lastChanged = ${cursorTs} AND ${recordKey}.id > '${cursorId}') OR (${recordKey}.lastChanged > ${cursorTs}))`
+            : `${recordKey}.lastChanged >= ${cursorTs}`;
+
+        const queryUrl = `${process.env.FSM_QUERY_URL}?account=${process.env.FSM_ACCOUNT}&company=${process.env.FSM_COMPANY}&dtos=${entityName}.${dtoVersion}&pageSize=500`;
+        const query = { query: `SELECT ${fields.join(', ')} FROM ${entityName} ${recordKey} WHERE ${whereClause} ORDER BY ${recordKey}.lastChanged ASC, ${recordKey}.id ASC` };
 
         const response = await fetch(queryUrl, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${token}`,
                 'Content-Type': 'application/json',
-                'X-Client-ID': 'FSM-Azure-Sync-Incremental',
-                'X-Client-Version': '1.1.0'
+                'X-Client-ID': 'FSM-Azure-Sync-DeepPagination',
+                'X-Client-Version': '1.2.0'
             },
             body: JSON.stringify(query)
         });
 
         if (!response.ok) throw new Error(`${entityName} Query failed: ${await response.text()}`);
         const pageData = await response.json();
-
-        if (currentPage === 1) totalPages = pageData.lastPage || 1;
 
         if (pageData.data && pageData.data.length > 0) {
             for (const record of pageData.data) {
@@ -218,16 +234,22 @@ async function genericSync(pool, token, entityName, dtoVersion, fields, lastSync
                 const updateSet = columns.map(col => `[${col}] = @${col}`).join(', ') + ', lastSync = GETDATE()';
                 request.input('id_pk', data.id);
                 await request.query(`MERGE INTO [${SCHEMA}].[${lastSyncTable}] AS target USING (SELECT @id_pk AS id) AS source ON (target.id = source.id) WHEN MATCHED THEN UPDATE SET ${updateSet} WHEN NOT MATCHED THEN INSERT (id, ${columns.join(', ')}) VALUES (@id_pk, ${columns.map(c => `@${c}`).join(', ')});`);
+
+                // Update local cursor to the current record
+                cursorTs = data.lastChanged;
+                cursorId = data.id;
             }
-            console.log(`Synced ${pageData.data.length} ${entityName}.`);
+            totalSynced += pageData.data.length;
+            console.log(`Batch processed: ${pageData.data.length} records. Total synced for ${entityName}: ${totalSynced}`);
+        } else {
+            hasMore = false;
         }
-        currentPage++;
-    } while (currentPage <= totalPages);
+    }
+    console.log(`--- Finished Deep Sync for ${entityName} ---`);
 }
 
 async function main() {
-    console.log('--- STARTING CONTINUOUS INCREMENTAL SYNC WITH SCHEMA SUPPORT ---');
-    console.log('Verifying Config:');
+    console.log('--- STARTING DEP-PAGINATION CONTINUOUS SYNC ---');
     if (!process.env.DB_SERVER) { console.error('FATAL ERROR: DB_SERVER is not defined.'); process.exit(1); }
 
     let pool;
