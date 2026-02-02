@@ -50,7 +50,6 @@ const BP_FIELDS = [
     'bp.officePhone', 'bp.remarks', 'bp.syncStatus', 'bp.type', 'bp.udfValues'
 ];
 const EP_FIELDS = ['eq.businessPartner', 'eq.code', 'eq.createDateTime', 'eq.externalId', 'eq.globalUniqueId', 'eq.id', 'eq.inactive', 'eq.item', 'eq.lastChanged', 'eq.name', 'eq.syncStatus', 'eq.tool', 'eq.udfValues'];
-const TE_FIELDS = ['te.id', 'te.activity', 'te.item', 'te.startDateTime', 'te.endDateTime', 'te.durationInMinutes', 'te.externalId', 'te.lastChanged', 'te.lastChangedBy'];
 const MA_FIELDS = [
     'mt.chargeOption', 'mt.createDateTime', 'mt.createPerson', 'mt.date',
     'mt.equipment', 'mt.id', 'mt.inactive', 'mt.item', 'mt.lastChanged',
@@ -95,7 +94,6 @@ async function ensureSchemaAndMigration(pool) {
         { name: 'ActivitiesFSM', sql: `CREATE TABLE [${SCHEMA}].[ActivitiesFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
         { name: 'BusinessPartnersFSM', sql: `CREATE TABLE [${SCHEMA}].[BusinessPartnersFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
         { name: 'EquipmentsFSM', sql: `CREATE TABLE [${SCHEMA}].[EquipmentsFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
-        { name: 'TimeEffortsFSM', sql: `CREATE TABLE [${SCHEMA}].[TimeEffortsFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
         { name: 'MaterialsFSM', sql: `CREATE TABLE [${SCHEMA}].[MaterialsFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` },
         { name: 'ItemsFSM', sql: `CREATE TABLE [${SCHEMA}].[ItemsFSM] (id NVARCHAR(100) PRIMARY KEY, lastChanged BIGINT, lastSync DATETIME)` }
     ];
@@ -245,7 +243,6 @@ async function main() {
                 await genericSync(pool, token, 'Activity', '43', AC_FIELDS, 'ActivitiesFSM', 'ac');
                 await genericSync(pool, token, 'BusinessPartner', '25', BP_FIELDS, 'BusinessPartnersFSM', 'bp');
                 await genericSync(pool, token, 'Equipment', '24', EP_FIELDS, 'EquipmentsFSM', 'eq');
-                await genericSync(pool, token, 'TimeEffort', '21', TE_FIELDS, 'TimeEffortsFSM', 'te');
                 await genericSync(pool, token, 'Material', '21', MA_FIELDS, 'MaterialsFSM', 'mt');
                 await genericSync(pool, token, 'Item', '17', IT_FIELDS, 'ItemsFSM', 'it');
 
